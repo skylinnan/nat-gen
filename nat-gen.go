@@ -6,8 +6,6 @@ import (
 	"encoding/xml"
 	"errors"
 	"fmt"
-	"github.com/astaxie/beego/config"
-	_ "github.com/go-sql-driver/mysql"
 	"io"
 	"io/ioutil"
 	"nat-gen/logs"
@@ -17,15 +15,25 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/astaxie/beego/config"
+	_ "github.com/go-sql-driver/mysql"
 )
 
+var f *os.File
+var err error
 var exit chan bool
 var datachan chan []byte
+var writedata chan string
 var log *logs.BeeLogger
 var logdetail *logs.BeeLogger
 var db *sql.DB
-
-var serverport, cache, threadnum, cacheprint int
+var filename string
+var fileindex uint64
+var tmpindex uint64
+var count uint64
+var timecount int
+var serverport, cache, threadnum, cacheprint, filecount, filetimespan int
 var serverip string
 
 var execsql string
@@ -55,7 +63,16 @@ func init() {
 	if cache == 0 || cache < 0 || cache > 3000000 {
 		cache = 100000
 	}
+	filecount, _ = iniconf.Int("Server::filecount")
+	if filecount == 0 {
+		filecount = 10000
+	}
+	filetimespan, _ = iniconf.Int("Server::filetimespan")
+	if filetimespan == 0 {
+		filetimespan = 15
+	}
 	datachan = make(chan []byte, cache)
+	writedata = make(chan string, cache)
 	threadnum, _ = iniconf.Int("Server::threadnum")
 	if threadnum == 0 || threadnum < 0 || threadnum > 30000 {
 		threadnum = 10
@@ -113,7 +130,7 @@ func init() {
 	logdetail.SetLogger("file", logstr)
 	//loginit finish
 	//dbinit
-	dbhost := iniconf.String("Db::dbhost")
+	/*dbhost := iniconf.String("Db::dbhost")
 	dbport := iniconf.String("Db::dbport")
 	dbuser := iniconf.String("Db::dbuser")
 	dbpassword := iniconf.String("Db::dbpassword")
@@ -147,6 +164,7 @@ func init() {
 	} else {
 		fmt.Println("Db connect.")
 	}
+	*/
 	//dbinit finish
 	//execinit
 	execsql = iniconf.String("Exec::sql")
@@ -189,18 +207,24 @@ func main() {
 
 	for i := 0; i < threadnum; i++ {
 
-		go WriteSysLog(i)
+		go WriteSysLog()
 	}
 	//启动统计线程
 	ticker := time.NewTicker(time.Duration(cacheprint) * time.Second)
 	go func() {
 		for _ = range ticker.C {
 			temp := (recvin - temprecv) / uint64(cacheprint)
-			log.Info("now the cache is %d,recv in is %d,speed is %d.", cache-len(datachan), recvin, temp)
+			log.Info("now the recv cache is %d,write data cache is %d,recv in is %d,speed is %d.", cache-len(datachan), cache-len(writedata), recvin, temp)
 			temprecv = recvin
 		}
 	}()
-
+	//启动日志文件记录线程
+	filename = fmt.Sprintf("log/%s_%d.log", time.Now().Format("20060102150405"), fileindex)
+	f, err = os.OpenFile(filename, os.O_CREATE|os.O_APPEND|os.O_RDWR, 0666)
+	if err != nil {
+		panic(err.Error())
+	}
+	go WriteToFile()
 	<-exit
 }
 
@@ -269,7 +293,7 @@ func LoadXmlNode(filename string) (xmlnode []string, err error) {
 		case xml.CharData:
 			content := string([]byte(se))
 			if content[0] != 15 && content[0] != 40 && content[0] != 12 && content[0] != 10 {
-				xmlnode = append(xmlnode, strings.ToUpper(attrname))
+				xmlnode = append(xmlnode, attrname)
 
 			}
 		case xml.EndElement:
@@ -279,18 +303,12 @@ func LoadXmlNode(filename string) (xmlnode []string, err error) {
 	return
 }
 func FormatSql(sql string) (sqlnode []string) {
-	sql = strings.ToUpper(sql)
+	//sql = strings.ToUpper(sql)
 	sqlnode = strings.Split(sql, " ")
 	return
 }
 func DecodeSyslog(logstr string, xmlnode []string) (lognode map[string]string, err error) {
-	logstr = strings.ToUpper(logstr)
-	logstr = strings.Replace(logstr, ";", "", -1)
-	logstr = strings.Replace(logstr, "[", "", -1)
-	logstr = strings.Replace(logstr, "]", "", -1)
-	logstr = strings.Replace(logstr, "-->", "", -1)
-	logstr = strings.Replace(logstr, "-DEVIP=", "", -1)
-	logstr = strings.Replace(logstr, "PROTOCOL:", "", -1)
+
 	node := strings.Split(logstr, " ")
 	if len(node) != len(xmlnode) {
 		err = errors.New("syslog format err.")
@@ -303,7 +321,7 @@ func DecodeSyslog(logstr string, xmlnode []string) (lognode map[string]string, e
 
 	return
 }
-func WriteToFile(lognode map[string]string, sqlnode []string) (result string) {
+func EncodeSysLog(lognode map[string]string, sqlnode []string) (result string) {
 	for _, n := range sqlnode {
 		v, ok := lognode[n]
 		if ok {
@@ -321,26 +339,36 @@ func checkFileIsExist(filename string) bool {
 	}
 	return exist
 }
-
-func WriteSysLog(index int) {
-	var f *os.File
-	filename := fmt.Sprintf("log/logdetail%d.log", index)
-	fmt.Println(filename)
-	if checkFileIsExist(filename) {
-		f, _ = os.OpenFile(filename, os.O_APPEND, 0666)
-	} else {
-		f, _ = os.Create(filename)
+func ReplaceDot(s string) string {
+	source := []byte(s)
+	tmp := make([]byte, 1024)
+	var tmpindex int
+	for index, v := range source {
+		if v == '[' {
+			//fmt.Println(string(source[:index]))
+			tmp = source[:index]
+			tmpindex = index
+			//fmt.Println(string(tmp))
+		} else if v == ']' {
+			//fmt.Println(string(source[tmpindex+1 : index]))
+			tmp = append(tmp, source[tmpindex+1:index]...)
+		}
 	}
+	return string(tmp)
+}
+func WriteSysLog() {
+
 	for {
 		rawdata := <-datachan
 		str := string(rawdata)
-		lognode, err := DecodeSyslog(str, xmlnode)
+		lognode, err := DecodeSyslog(ReplaceDot(str), xmlnode)
 		if err != nil {
 			log.Debug("%s|%s", str, err.Error())
 			continue
 		}
-		str = WriteToFile(lognode, sqlnode)
-		io.WriteString(f, str)
+		str = EncodeSysLog(lognode, sqlnode)
+		writedata <- str
+		//io.WriteString(f, str)
 		//logdetail.Info(str)
 
 		/*	data := Decode(rawdata)
@@ -368,4 +396,41 @@ func WriteSysLog(index int) {
 		*/
 
 	}
+}
+func WriteToFile() {
+	for {
+		str := <-writedata
+		if fileindex != tmpindex {
+			f.Close()
+			filename = fmt.Sprintf("log/%s_%d.log", time.Now().Format("20060102150405"), fileindex)
+			f, err = os.OpenFile(filename, os.O_CREATE|os.O_APPEND|os.O_RDWR, 0666)
+			if err != nil {
+				panic(err.Error())
+			}
+			tmpindex = fileindex
+		}
+		if time.Now().Second()-timecount > filetimespan*60 {
+			fileindex++
+			timecount = time.Now().Second()
+		} else if count > uint64(filecount) {
+			fileindex++
+			count = 0
+		}
+		count++
+		/*if checkFileIsExist(filename) {
+			f, err = os.OpenFile(filename, os.O_APPEND|os.O_RDWR, 0666)
+			if err != nil {
+				panic(err.Error())
+			}
+		} else {
+			f, err = os.Create(filename)
+			if err != nil {
+				panic(err.Error())
+			}
+		}*/
+		io.WriteString(f, str)
+		//f.Close()
+
+	}
+
 }
