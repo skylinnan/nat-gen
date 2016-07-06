@@ -6,6 +6,8 @@ import (
 	"encoding/xml"
 	"errors"
 	"fmt"
+	"github.com/astaxie/beego/config"
+	_ "github.com/go-sql-driver/mysql"
 	"io"
 	"io/ioutil"
 	"nat-gen/logs"
@@ -14,11 +16,15 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
-
-	"github.com/astaxie/beego/config"
-	_ "github.com/go-sql-driver/mysql"
 )
+
+type SessionInfo struct {
+	info  string
+	atime string
+	wtime string
+}
 
 var f *os.File
 var err error
@@ -32,7 +38,7 @@ var filename string
 var fileindex uint64
 var tmpindex uint64
 var count uint64
-var timecount int
+var timecount int64
 var serverport, cache, threadnum, cacheprint, filecount, filetimespan int
 var serverip string
 
@@ -43,6 +49,8 @@ var xmlnode []string
 var sqlnode []string
 var recvin uint64
 var temprecv uint64
+var mutex sync.Mutex
+var userinfo map[string]SessionInfo
 
 func init() {
 	//config
@@ -128,6 +136,7 @@ func init() {
 	logname = "log/logdetail.log"
 	logstr = fmt.Sprintf(`{"filename":"%s","maxsize":%d,"maxdays":%d}`, logname, logsize, logsaveday)
 	logdetail.SetLogger("file", logstr)
+	userinfo = make(map[string]SessionInfo)
 	//loginit finish
 	//dbinit
 	/*dbhost := iniconf.String("Db::dbhost")
@@ -367,39 +376,34 @@ func WriteSysLog() {
 			continue
 		}
 		str = EncodeSysLog(lognode, sqlnode)
-		writedata <- str
-		//io.WriteString(f, str)
-		//logdetail.Info(str)
-
-		/*	data := Decode(rawdata)
-			if len(data) == 0 {
-				return
-			}
-			var exec = execsql
-			for _, v := range useattr {
-				exec = strings.Replace(exec, v, data[v], -1)
-			}
-			log.Debug(exec)
-			row := db.QueryRow(exec)
-			if err != nil {
-				log.Info(err.Error())
-			} else {
-				log.Info("insert db success.")
-			}
-			var result int
-			err := row.Scan(&result)
-			if err != nil {
-				log.Info(err.Error())
-			} else {
-				log.Info(exec + "| result:" + strconv.Itoa(result))
-			}
-		*/
-
+		var info SessionInfo
+		y, _ := lognode["Year"]
+		m, _ := lognode["Mon"]
+		d, _ := lognode["Day"]
+		h, _ := lognode["Hms"]
+		msgid, _ := lognode["MsgId"]
+		pubip, _ := lognode["OriSIp"]
+		pubport, _ := lognode["TranFPort"]
+		key := pubip + pubport
+		//info.timestamp = CalcTime(y, m, d, hms)
+		month := EncodeMon(m)
+		hms := strings.Replace(h, ":", "", -1)
+		tstr := y + month + d + hms
+		info.atime = tstr
+		info.wtime = tstr
+		info.info = str
+		//fmt.Println(info.info, tstr, key, msgid[len(msgid)-1])
+		session, ok := GetUserSession(key, info, msgid[len(msgid)-1])
+		if ok {
+			str = str + session.atime + " " + session.wtime + "\n"
+			writedata <- str
+		}
 	}
 }
 func WriteToFile() {
 	for {
 		str := <-writedata
+		//fmt.Println(str)
 		if fileindex != tmpindex {
 			f.Close()
 			filename = fmt.Sprintf("log/%s_%d.log", time.Now().Format("20060102150405"), fileindex)
@@ -409,28 +413,94 @@ func WriteToFile() {
 			}
 			tmpindex = fileindex
 		}
-		if time.Now().Second()-timecount > filetimespan*60 {
+		if time.Now().Unix()-timecount > int64(filetimespan*60) {
 			fileindex++
-			timecount = time.Now().Second()
+			timecount = time.Now().Unix()
 		} else if count > uint64(filecount) {
 			fileindex++
 			count = 0
 		}
 		count++
-		/*if checkFileIsExist(filename) {
-			f, err = os.OpenFile(filename, os.O_APPEND|os.O_RDWR, 0666)
-			if err != nil {
-				panic(err.Error())
-			}
-		} else {
-			f, err = os.Create(filename)
-			if err != nil {
-				panic(err.Error())
-			}
-		}*/
 		io.WriteString(f, str)
-		//f.Close()
-
 	}
 
+}
+func GetUserSession(key string, info SessionInfo, stype byte) (SessionInfo, bool) {
+	var usersessioninfo SessionInfo
+	var r = false
+	mutex.Lock()
+	value, ok := userinfo[key]
+	if ok {
+		switch stype {
+		case 'A':
+			delete(userinfo, key)
+			userinfo[key] = info
+		case 'W':
+			usersessioninfo.info = info.info
+			usersessioninfo.atime = value.atime
+			usersessioninfo.wtime = info.wtime
+			delete(userinfo, key)
+			r = true
+		}
+	} else {
+		switch stype {
+		case 'A':
+			userinfo[key] = info
+		case 'W':
+			usersessioninfo = info
+			delete(userinfo, key)
+			r = true
+		}
+	}
+	mutex.Unlock()
+	return usersessioninfo, r
+}
+func CalcTimeStamp(tstart string, tstop string) string {
+	timestart, _ := strconv.Atoi(tstop)
+	timestop, _ := strconv.Atoi(tstop)
+
+	return strconv.Itoa((timestart - timestop))
+}
+func CalcTime(y string, m string, d string, hms string) int64 {
+	var timet int64
+	timestr := y + " " + m + " " + d + " " + hms
+	fmt.Println(timestr)
+	t, err := time.Parse("2006 Jan 02 15:04:05", timestr)
+	if err != nil {
+		timet = 0
+	} else {
+		timet = t.Unix()
+	}
+	fmt.Println("time is ", timet)
+	return timet
+}
+func EncodeMon(m string) string {
+	var month string
+	switch m {
+	case "Jan":
+		month = "01"
+	case "Feb":
+		month = "02"
+	case "Mar":
+		month = "03"
+	case "Apr":
+		month = "04"
+	case "May":
+		month = "05"
+	case "Jun":
+		month = "06"
+	case "Jul":
+		month = "07"
+	case "Aug":
+		month = "08"
+	case "Sep":
+		month = "09"
+	case "Oct":
+		month = "10"
+	case "Nov":
+		month = "11"
+	case "Dec":
+		month = "12"
+	}
+	return month
 }
