@@ -317,8 +317,8 @@ func FormatSql(sql string) (sqlnode []string) {
 	return
 }
 func DecodeSyslog(logstr string, xmlnode []string) (lognode map[string]string, err error) {
-
-	node := strings.Split(logstr, " ")
+	str := strings.Replace(logstr, "  ", " ", -1)
+	node := strings.Split(str, " ")
 	if len(node) != len(xmlnode) {
 		err = errors.New("syslog format err.")
 		return
@@ -392,6 +392,7 @@ func WriteSysLog() {
 		info.atime = tstr
 		info.wtime = tstr
 		info.info = str
+		log.Debug("info = %s,tstr = %s ,key = %s, msgid = %d.", info.info, tstr, key, msgid[len(msgid)-1])
 		//fmt.Println(info.info, tstr, key, msgid[len(msgid)-1])
 		session, ok := GetUserSession(key, info, msgid[len(msgid)-1])
 		if ok {
@@ -404,6 +405,7 @@ func WriteToFile() {
 	for {
 		str := <-writedata
 		//fmt.Println(str)
+		log.Debug("write to file=%s", str)
 		if fileindex != tmpindex {
 			f.Close()
 			filename = fmt.Sprintf("log/%s_%d.log", time.Now().Format("20060102150405"), fileindex)
