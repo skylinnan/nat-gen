@@ -5,15 +5,20 @@ import (
 	"database/sql"
 	"encoding/xml"
 	"errors"
+	//"flag"
 	"fmt"
 	"github.com/astaxie/beego/config"
 	_ "github.com/go-sql-driver/mysql"
 	"io"
 	"io/ioutil"
+	"log"
 	"nat-gen/logs"
 	"net"
+	"net/http"
+	_ "net/http/pprof"
 	"os"
 	"regexp"
+	//"runtime/pprof"
 	"strconv"
 	"strings"
 	"sync"
@@ -31,7 +36,7 @@ var err error
 var exit chan bool
 var datachan chan []byte
 var writedata chan string
-var log *logs.BeeLogger
+var logfile *logs.BeeLogger
 var logdetail *logs.BeeLogger
 var db *sql.DB
 var filename string
@@ -41,6 +46,7 @@ var count uint64
 var timecount int64
 var serverport, cache, threadnum, cacheprint, filecount, filetimespan int
 var serverip string
+var profileserver string
 
 var execsql string
 var format []string
@@ -51,6 +57,8 @@ var recvin uint64
 var temprecv uint64
 var mutex sync.Mutex
 var userinfo map[string]SessionInfo
+
+//var cpuprofile = flag.String("cpuprofile", "", "write cpu profile to file")
 
 func init() {
 	//config
@@ -85,6 +93,7 @@ func init() {
 	if threadnum == 0 || threadnum < 0 || threadnum > 30000 {
 		threadnum = 10
 	}
+	profileserver = iniconf.String("Server::profileserver")
 	//serverinit finish
 	//log init
 	logdir, err := os.Stat("log")
@@ -127,10 +136,10 @@ func init() {
 		cacheprint = 10
 	}
 
-	log = logs.NewLogger(10000)
-	log.SetLevel(loglevel)
+	logfile = logs.NewLogger(10000)
+	logfile.SetLevel(loglevel)
 	logstr := fmt.Sprintf(`{"filename":"%s","maxsize":%d,"maxdays":%d}`, logname, logsize, logsaveday)
-	log.SetLogger("file", logstr)
+	logfile.SetLogger("file", logstr)
 	logdetail = logs.NewLogger(10000)
 	logdetail.SetLevel(1)
 	logname = "log/logdetail.log"
@@ -196,12 +205,15 @@ func init() {
 }
 
 func main() {
+	go func() {
+		log.Println(http.ListenAndServe(profileserver, nil))
+	}()
 	addr, _ := net.ResolveUDPAddr("udp", serverip+":"+strconv.Itoa(serverport))
 	conn, err := net.ListenUDP("udp", addr)
 	if err != nil {
 		panic(err)
 	}
-	log.Info("started.")
+	logfile.Info("started.")
 	var b [512]byte
 	//启动监听线程
 	go func() {
@@ -223,7 +235,7 @@ func main() {
 	go func() {
 		for _ = range ticker.C {
 			temp := (recvin - temprecv) / uint64(cacheprint)
-			log.Info("now the recv cache is %d,write data cache is %d,recv in is %d,speed is %d.", cache-len(datachan), cache-len(writedata), recvin, temp)
+			logfile.Info("now the recv cache is %d,write data cache is %d,recv in is %d,speed is %d.", cache-len(datachan), cache-len(writedata), recvin, temp)
 			temprecv = recvin
 		}
 	}()
@@ -241,38 +253,38 @@ func main() {
 func Decode(s []byte) map[string]string {
 	data := make(map[string]string)
 	str := string(s)
-	log.Debug(str)
+	logfile.Debug(str)
 	data["{deviceip}"] = regexp.MustCompile(`((2[0-4]\d|25[0-5]|[01]?\d\d?)\.){3}(2[0-4]\d|25[0-5]|[01]?\d\d?)`).FindString(str)
-	log.Debug("deviceip is %s", data["{deviceip}"])
+	logfile.Debug("deviceip is %s", data["{deviceip}"])
 	data["{timestamp}"] = regexp.MustCompile(`(\d{4})-(0\d{1}|1[0-2])-(0\d{1}|[12]\d{1}|3[01])T(0\d{1}|1\d{1}|2[0-3]):[0-5]\d{1}:([0-5]\d{1})\.\d{1,}Z`).FindString(str)
-	log.Debug("timestamp is %s", data["{timestamp}"])
+	logfile.Debug("timestamp is %s", data["{timestamp}"])
 	portrangetype := regexp.MustCompile(`An.*?portrange\s`).FindString(str)
 	data["{portrangetype}"] = regexp.MustCompile(`(An\s|\sportrange\s)`).ReplaceAllString(portrangetype, ``)
-	log.Debug("portrangetype is %s", data["{portrangetype}"])
+	logfile.Debug("portrangetype is %s", data["{portrangetype}"])
 	portaction := regexp.MustCompile(`is.*?,`).FindString(str)
 	data["{portaction}"] = regexp.MustCompile(`(is\s|,)`).ReplaceAllString(portaction, ``)
-	log.Debug("portaction is %s", data["{portaction}"])
+	logfile.Debug("portaction is %s", data["{portaction}"])
 	privateip := regexp.MustCompile(`privateip='.*?'`).FindString(str)
 	data["{privateip}"] = regexp.MustCompile(`(privateip='|')`).ReplaceAllString(privateip, ``)
-	log.Debug("privateip is %s", data["{privateip}"])
+	logfile.Debug("privateip is %s", data["{privateip}"])
 	srcvrfid := regexp.MustCompile(`srcvrfid='.*?'`).FindString(str)
 	data["{srcvrfid}"] = regexp.MustCompile(`(srcvrfid='|')`).ReplaceAllString(srcvrfid, ``)
-	log.Debug("srcvrfid is %s", data["{srcvrfid}"])
+	logfile.Debug("srcvrfid is %s", data["{srcvrfid}"])
 	publicip := regexp.MustCompile(`publicip='.*?'`).FindString(str)
 	data["{publicip}"] = regexp.MustCompile(`(publicip='|')`).ReplaceAllString(publicip, ``)
-	log.Debug("publicip is %s", data["{publicip}"])
+	logfile.Debug("publicip is %s", data["{publicip}"])
 	publicstartport := regexp.MustCompile(`publicportrange='\d*?~`).FindString(str)
 	data["{publicstartport}"] = regexp.MustCompile(`(publicportrange='|~)`).ReplaceAllString(publicstartport, ``)
-	log.Debug("publicstartport is %s", data["{publicstartport}"])
+	logfile.Debug("publicstartport is %s", data["{publicstartport}"])
 	publicsendport := regexp.MustCompile(`~\d*?'`).FindString(str)
 	data["{publicsendport}"] = regexp.MustCompile(`('|~)`).ReplaceAllString(publicsendport, ``)
-	log.Debug("publicsendport is %s", data["{publicsendport}"])
+	logfile.Debug("publicsendport is %s", data["{publicsendport}"])
 	actiontime := regexp.MustCompile(`time='.*?'`).FindString(str)
 	data["{actiontime}"] = regexp.MustCompile(`(time='|')`).ReplaceAllString(actiontime, ``)
-	log.Debug("actiontime is %s", data["{actiontime}"])
+	logfile.Debug("actiontime is %s", data["{actiontime}"])
 	isval := Checknil(data)
 	if isval == false {
-		log.Info("data format error! the value is not enough.")
+		logfile.Info("data format error! the value is not enough.")
 		return make(map[string]string)
 	}
 	return data
@@ -282,12 +294,13 @@ func Decode(s []byte) map[string]string {
 func Checknil(m map[string]string) bool {
 	for _, v := range useattr {
 		if len(m[v]) == 0 {
-			log.Info("%s is not null!", v)
+			logfile.Info("%s is not null!", v)
 			return false
 		}
 	}
 	return true
 }
+
 func LoadXmlNode(filename string) (xmlnode []string, err error) {
 	xmlfile, err := ioutil.ReadFile(filename)
 	if err != nil {
@@ -372,7 +385,7 @@ func WriteSysLog() {
 		str := string(rawdata)
 		lognode, err := DecodeSyslog(ReplaceDot(str), xmlnode)
 		if err != nil {
-			log.Debug("%s|%s", str, err.Error())
+			logfile.Debug("%s|%s", str, err.Error())
 			continue
 		}
 		str = EncodeSysLog(lognode, sqlnode)
@@ -392,7 +405,7 @@ func WriteSysLog() {
 		info.atime = tstr
 		info.wtime = tstr
 		info.info = str
-		log.Debug("info = %s,tstr = %s ,key = %s, msgid = %d.", info.info, tstr, key, msgid[len(msgid)-1])
+		logfile.Debug("info = %s,tstr = %s ,key = %s, msgid = %d.", info.info, tstr, key, msgid[len(msgid)-1])
 		//fmt.Println(info.info, tstr, key, msgid[len(msgid)-1])
 		session, ok := GetUserSession(key, info, msgid[len(msgid)-1])
 		if ok {
@@ -405,7 +418,7 @@ func WriteToFile() {
 	for {
 		str := <-writedata
 		//fmt.Println(str)
-		log.Debug("write to file=%s", str)
+		logfile.Debug("write to file=%s", str)
 		if fileindex != tmpindex {
 			f.Close()
 			filename = fmt.Sprintf("log/%s_%d.log", time.Now().Format("20060102150405"), fileindex)
@@ -415,12 +428,13 @@ func WriteToFile() {
 			}
 			tmpindex = fileindex
 		}
-		if time.Now().Unix()-timecount > int64(filetimespan*60) {
+		if (time.Now().Unix()-timecount >= int64(filetimespan*60)) || (count >= uint64(filecount)) {
 			fileindex++
 			timecount = time.Now().Unix()
-		} else if count > uint64(filecount) {
-			fileindex++
 			count = 0
+		}
+		if fileindex == 5 {
+			fileindex = 0
 		}
 		count++
 		io.WriteString(f, str)
