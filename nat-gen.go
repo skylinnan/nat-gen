@@ -19,6 +19,7 @@ import (
 	"os"
 	"regexp"
 	//"runtime/pprof"
+	"nat-gen/autoconfig"
 	"strconv"
 	"strings"
 	"sync"
@@ -47,6 +48,7 @@ var timecount int64
 var serverport, cache, threadnum, cacheprint, filecount, filetimespan int
 var serverip string
 var profileserver string
+var logflag string
 
 var execsql string
 var format []string
@@ -57,6 +59,7 @@ var recvin uint64
 var temprecv uint64
 var mutex sync.Mutex
 var userinfo map[string]SessionInfo
+var natconfig *autoconfig.AutoConfig
 
 //var cpuprofile = flag.String("cpuprofile", "", "write cpu profile to file")
 
@@ -135,7 +138,7 @@ func init() {
 	if cacheprint == 0 || cacheprint < 0 {
 		cacheprint = 10
 	}
-
+	logflag = iniconf.String("Log::logdetail")
 	logfile = logs.NewLogger(10000)
 	logfile.SetLevel(loglevel)
 	logstr := fmt.Sprintf(`{"filename":"%s","maxsize":%d,"maxdays":%d}`, logname, logsize, logsaveday)
@@ -202,8 +205,33 @@ func init() {
 	}
 	//useattr = regexp.MustCompile(`{.*?}`).FindAllString(execsql, -1)
 	//execinit
-}
 
+	natconfig = new(autoconfig.AutoConfig)
+
+}
+func InitConfig() {
+	for {
+		natconfig.Load("config.ini")
+		if natconfig.IsReload() {
+			iniconf, err := config.NewConfig("ini", "config.ini")
+			if err != nil {
+				panic(err.Error())
+			}
+
+			loglevel, _ := iniconf.Int("Log::debug")
+			if loglevel == 0 || loglevel < 0 || loglevel > 4 {
+				loglevel = 1
+			}
+			logfile.SetLevel(loglevel)
+			logflag = iniconf.String("Log::logdetail")
+			filecount, _ = iniconf.Int("Server::filecount")
+			filetimespan, _ = iniconf.Int("Server::filetimespan")
+			logfile.Info("reload config success .")
+		}
+		time.Sleep(3 * time.Second)
+	}
+
+}
 func main() {
 	go func() {
 		log.Println(http.ListenAndServe(profileserver, nil))
@@ -221,6 +249,9 @@ func main() {
 			n, _ := conn.Read(b[:])
 			p := b[:n]
 			recvin++
+			if logflag == "true" {
+				logdetail.Info(string(p))
+			}
 			datachan <- p
 		}
 	}()
@@ -246,6 +277,7 @@ func main() {
 		panic(err.Error())
 	}
 	go WriteToFile()
+	go InitConfig()
 	<-exit
 }
 
@@ -385,7 +417,7 @@ func WriteSysLog() {
 		str := string(rawdata)
 		lognode, err := DecodeSyslog(ReplaceDot(str), xmlnode)
 		if err != nil {
-			logfile.Debug("%s|%s", str, err.Error())
+			logfile.Info("%s|%s", str, err.Error())
 			continue
 		}
 		str = EncodeSysLog(lognode, sqlnode)
