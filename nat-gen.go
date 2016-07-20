@@ -420,6 +420,15 @@ func WriteSysLog() {
 			logfile.Info("%s|%s", str, err.Error())
 			continue
 		}
+		l4, _ := lognode["L4"]
+		if l4 == "6" {
+			lognode["L4"] = "TCP"
+		} else if l4 == "17" {
+			lognode["L4"] = "UDP"
+		} else {
+			continue
+		}
+
 		str = EncodeSysLog(lognode, sqlnode)
 		var info SessionInfo
 		y, _ := lognode["Year"]
