@@ -32,10 +32,15 @@ type SessionInfo struct {
 	wtime string
 }
 
+type SyslogInfo struct {
+	data []byte
+	id   uint64
+}
+
 var f *os.File
 var err error
 var exit chan bool
-var datachan chan []byte
+var datachan chan SyslogInfo
 var writedata chan string
 var logfile *logs.BeeLogger
 var logdetail *logs.BeeLogger
@@ -90,7 +95,7 @@ func init() {
 	if filetimespan == 0 {
 		filetimespan = 15
 	}
-	datachan = make(chan []byte, cache)
+	datachan = make(chan SyslogInfo, cache)
 	writedata = make(chan string, cache)
 	threadnum, _ = iniconf.Int("Server::threadnum")
 	if threadnum == 0 || threadnum < 0 || threadnum > 30000 {
@@ -242,17 +247,20 @@ func main() {
 		panic(err)
 	}
 	logfile.Info("started.")
-	var b [512]byte
 	//启动监听线程
 	go func() {
 		for {
+			var b [512]byte
+			var recvlog SyslogInfo
 			n, _ := conn.Read(b[:])
-			p := b[:n]
 			recvin++
+			recvlog.data = make([]byte, n)
+			recvlog.data = b[:n]
+			recvlog.id = recvin
 			if logflag == "true" {
-				logdetail.Info(string(p))
+				logdetail.Info("%s,%d", string(recvlog.data), recvlog.id)
 			}
-			datachan <- p
+			datachan <- recvlog
 		}
 	}()
 	//启动对应数量线程
@@ -362,8 +370,9 @@ func FormatSql(sql string) (sqlnode []string) {
 	return
 }
 func DecodeSyslog(logstr string, xmlnode []string) (lognode map[string]string, err error) {
-	str := strings.Replace(logstr, "  ", " ", -1)
-	node := strings.Split(str, " ")
+
+	//str := strings.Replace(logstr, "  ", " ", -1)
+	node := strings.Split(logstr, " ")
 	if len(node) != len(xmlnode) {
 		err = errors.New("syslog format err.")
 		return
@@ -414,7 +423,10 @@ func WriteSysLog() {
 
 	for {
 		rawdata := <-datachan
-		str := string(rawdata)
+		str := string(rawdata.data)
+		logfile.Debug("decodelog: %s,%d", str, rawdata.id)
+		//str = strings.Replace(str, "[", "", -1)
+		//str = strings.Replace(str, "]", "", -1)
 		lognode, err := DecodeSyslog(ReplaceDot(str), xmlnode)
 		if err != nil {
 			logfile.Info("%s|%s", str, err.Error())
@@ -426,6 +438,7 @@ func WriteSysLog() {
 		} else if l4 == "17" {
 			lognode["L4"] = "UDP"
 		} else {
+			logfile.Debug("discard log[%s]", str)
 			continue
 		}
 
@@ -438,7 +451,7 @@ func WriteSysLog() {
 		msgid, _ := lognode["MsgId"]
 		pubip, _ := lognode["OriSIp"]
 		pubport, _ := lognode["TranFPort"]
-		key := pubip + pubport
+		key := pubip + ":" + pubport
 		//info.timestamp = CalcTime(y, m, d, hms)
 		month := EncodeMon(m)
 		hms := strings.Replace(h, ":", "", -1)
