@@ -371,8 +371,8 @@ func FormatSql(sql string) (sqlnode []string) {
 }
 func DecodeSyslog(logstr string, xmlnode []string) (lognode map[string]string, err error) {
 
-	//str := strings.Replace(logstr, "  ", " ", -1)
-	node := strings.Split(logstr, " ")
+	str := strings.Replace(logstr, "  ", " ", -1)
+	node := strings.Split(str, " ")
 	if len(node) != len(xmlnode) {
 		err = errors.New("syslog format err.")
 		return
