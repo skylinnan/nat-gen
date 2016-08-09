@@ -281,28 +281,8 @@ func main() {
 			temprecv = recvin
 		}
 	}()
-	//启动日志文件记录线程
-	filename = fmt.Sprintf("log/%s_%d.log", time.Now().Format("20060102150405"), fileindex)
-	f, err = os.OpenFile(filename, os.O_CREATE|os.O_APPEND|os.O_RDWR, 0666)
-	if err != nil {
-		panic(err.Error())
-	}
-	//go WriteToFile()
 	go InitConfig()
 	<-exit
-}
-
-//Decode is decode the byte to syslog
-
-//Checknil check the map val is not nil
-func Checknil(m map[string]string) bool {
-	for _, v := range useattr {
-		if len(m[v]) == 0 {
-			logfile.Info("%s is not null!", v)
-			return false
-		}
-	}
-	return true
 }
 
 func LoadXmlNode(filename string) (xmlnode []string, err error) {
@@ -391,13 +371,13 @@ func WriteSysLog() {
 		lognode["Type"] = EncodeMsgId(lognode["MsgId"])
 		row, err := stmt.Query(lognode["Type"], lognode["OriSIp"], lognode["TranFPort"], lognode["TranSPort"], lognode["TranSIp"], lognode["Map_Time"])
 		if err != nil {
-			logfile.Info("Query err:%s|[%s]", str, err.Error())
+			logfile.Info("Query err:%s|%d|[%s]", str, err.Error(), rawdata.id)
 			continue
 		}
 		for row.Next() {
 			var result int
 			row.Scan(&result)
-			logfile.Info("result:%s|%d", str, result)
+			logfile.Info("result:%s|%d|%d", str, result, rawdata.id)
 		}
 	}
 }
