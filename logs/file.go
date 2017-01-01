@@ -259,7 +259,7 @@ func (w *FileLogWriter) DoRotateDate() error {
 		num := 1
 		fname := ""
 		for ; err == nil && num <= 999; num++ {
-			fname = w.Filename + fmt.Sprintf(".%s.%03d", time.Now().AddDate(0, 0, -1).Format("2006-01-02"), num)
+			fname = w.Filename + fmt.Sprintf(".%s.%03d", time.Now().Add(-(time.Hour*24)).Format("2006-01-02"), num)
 			_, err = os.Lstat(fname)
 		}
 		// return error if the last file checked still existed
